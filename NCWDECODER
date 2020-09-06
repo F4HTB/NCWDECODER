@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*- 
+
+import getopt
+import alsaaudio
+import sys
+import time
+import matplotlib.pyplot as plt
+import struct
+import numpy
+import scipy.signal
+from threading import Thread
+from PIL import Image
+import time
+
+numpy.seterr(divide='ignore')
+
+globalfftdatas = []
+globalpeaks = []
+audiodatas = []
+counterbuffer=0
+
+def usage():
+	print('usage: recordtest.py [-d <device>] [-p <plot mode>] [-r <rate>] [-o <output path for image plot>]', file=sys.stderr)
+	print("example: ./NCWDECODER -d plughw:lp20,1  -r 384000 -p fftonly")
+	print("plot can be 'fftonly' to see fft, 'watterfall' to see watterfall, 'tobmp' to registrer watterfall in hight resolution png")
+	sys.exit(2)
+
+class ThGetAudio(Thread):
+
+	def __init__(self, audiodevice, RATE, chunksize):
+		Thread.__init__(self)
+		FORMAT = alsaaudio.PCM_FORMAT_S16_LE #use the most standard format for chunks values
+		CHANNELS = 2 #in i/q system
+		self.inp = alsaaudio.PCM(alsaaudio.PCM_CAPTURE, alsaaudio.PCM_NORMAL , channels=CHANNELS, rate=RATE, format=FORMAT, periodsize=chunksize, device=audiodevice)	#init the audio input
+		
+	def audioinput(self): #read chunks and return à complex array for I/Q
+		l, ret = self.inp.read()
+		if l > 0:
+			# datas=numpy.frombuffer(ret, numpy.int16)#unstruck the bytes in a array
+			# return [complex(a,b) for a, b in zip(datas[::2],datas[1::2])] #transforme the int byt array of I real in left and  Q imgaginary right channel in complex 
+			return numpy.frombuffer(ret, numpy.int16)#unstruck the bytes in a array
+		else:
+			print("overrun")
+			
+	def run(self):
+		global audiodatas
+		while True:
+			audiodatas.append(self.audioinput())
+
+class ThSpectrumAnalyzer(Thread):
+	
+	def __init__(self):
+		Thread.__init__(self)
+		global globalpeaks, globalfftdatas, audiodatas
+		while not len(audiodatas):
+			print("wait for audio chunk for start")
+			time.sleep(0.1)
+		print("audio data ready!")
+		
+		self.chunksize = len(audiodatas[0])
+		self.window=[]
+		for a in numpy.hanning(chunksize): #calculation of the hanning window and stored in a double array to facilitate multiplication
+			self.window.append(a)
+			self.window.append(a)
+		print("hanning windows is compute: "+str(len(self.window))+"samples")
+		
+		self.windowbordermin=int(self.chunksize*20/100) #calculation of the fft min index data to be taken into account for the average speed during peak detection. For not to take into account the edges of the fft
+		self.windowbordermax=int(self.chunksize-self.windowbordermin) #calculation of the fft max index data to be taken into account for the average speed during peak detection
+		self.peakscore=[0]*self.chunksize
+
+	def fft(self, data1,data2,number=2):
+		lendata=int(len(data1)/number)
+		datas=[]
+		arrayoffft=[]
+		for i in range(number):
+			datas = numpy.concatenate([data1[(i*lendata):], data2[:(i*lendata)]])
+			# datas = data1[(i*lendata):] + data2[:(i*lendata)]
+			datas = datas *self.window
+			datasend = [complex(a,b) for a, b in zip(datas[::2],datas[1::2])]
+			fd_spectrum_rot = numpy.fft.fftshift(numpy.fft.fft(datasend,norm="ortho"))
+			arrayoffft.append(20.*numpy.log10(numpy.real(fd_spectrum_rot * fd_spectrum_rot.conj())))
+		return arrayoffft
+	
+	def findpeakinfft(self, datas, thresoldv=1, min_distance=1): #
+		minvalue = numpy.average(datas[self.windowbordermin:self.windowbordermax])+10 #calcul of the noise floor withut the borders and add 3db
+		peaks, _ = scipy.signal.find_peaks(datas, height=minvalue,distance=min_distance,threshold=thresoldv,prominence=1,width=5)#compute peak searching with datas, height to the minimum value, distance minimal beetween two peaks, use threshold for not detect the same peak nearby
+		return peaks
+		
+	def CWdetect(self, newpeaks):
+		for a in newpeaks:
+			self.peakscore[a] = self.peakscore[a] + 5
+		for i, val in enumerate(self.peakscore):
+			self.peakscore[i] = self.peakscore[i] - 1
+			if(val<0):
+				self.peakscore[i]=0
+				globalpeaks[i]=0
+			elif (val > 50):
+				globalpeaks[i]=100
+			elif (val < 10):
+				globalpeaks[i]=0
+				
+	def run(self):
+		global globalpeaks, globalfftdatas, audiodatas, counterbuffer
+		while True :
+			# try:
+			if len(audiodatas)>4:
+				if len(audiodatas[0])>0:
+					fftdatas = self.fft(audiodatas[0],audiodatas[1])
+					for row in fftdatas:
+						globalfftdatas.append(row)
+						counterbuffer += 1
+					while len(globalfftdatas) > 1000:
+						globalfftdatas.pop(0)
+				# if fftdatas.any():
+					# peaksindex = self.findpeakinfft(fftdatas)
+					# self.CWdetect(peaksindex)
+					audiodatas.pop(0)
+			else:
+				time.sleep(0.1)
+			# except:
+				# pass
+				# time.sleep(0.1)
+				
+class Thplot(Thread):
+
+	def __init__(self, plot,outputdirectory):
+		Thread.__init__(self)
+		while(len(globalfftdatas)<1000):
+			print("bufferisation:"+str(int(len(globalfftdatas)*100/1000))+"%")
+			time.sleep(0.2)
+			
+		if plot == "tobmp":
+			self.arrimg=numpy.zeros((1000,len(globalfftdatas[0])), dtype=float)
+		
+		self.outputdirectory = outputdirectory
+		print("ready to plot:" + str(plot))
+
+	def run(self):
+		global globalpeaks, globalfftdatas, counterbuffer
+		while True:
+			if plot == "fftonly":
+				plt.ylim(0, 500)
+				plt.plot(globalfftdatas[len(globalfftdatas)-1])
+				plt.plot(globalpeaks)
+				plt.draw()
+				plt.pause(0.5)
+				plt.clf()
+			elif plot == "watterfall":
+				while counterbuffer < 500:
+					print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+					time.sleep(0.2)
+				plt.ylim(0, len(globalfftdatas))
+				plt.imshow(globalfftdatas) 
+				plt.draw()
+				plt.pause(1)
+				plt.clf()
+				counterbuffer=0
+			elif plot == "tobmp":
+				while counterbuffer < 500:
+						print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+						time.sleep(0.2)
+				print("print image")
+				numpy.copyto(self.arrimg, globalfftdatas)
+				scipy.misc.toimage(self.arrimg, high=255, low=0, cmin=0, cmax=255).save(str(self.outputdirectory)+str(time.time())+'_out.png')
+				counterbuffer=0
+				time.sleep(1)
+				
+				# arr = numpy.array(globalfftdatas) 
+				# arr.reshape(-1, 3)
+				# Image.fromarray(globalfftdatas).save("./mesh_trans",".bmp")
+				
+				# paletteR, paletteG, paletteB = 4, 1, 4
+				# k = 4*256
+				
+				# def convert(val):
+					# v = val if val < 255 else 255
+					# return [v/paletteR, v/paletteG, v/paletteB]
+				
+				# for i in globalfftdatas:
+					# arrpng = [convert(pt) for pt in i]
+					# arrpng = numpy.array(arrpng)
+				
+				# imgOut = Image.fromarray(np.uint8(arrpng), 'RGB')
+				# imgOut.save('./'+str(time.time())+'_out.png')
+	
+if __name__ == "__main__":
+	outputdirectory = "./"
+	device = 'default'
+	rate = 48000
+	plot = False
+	
+	try:
+		opts, args = getopt.getopt(sys.argv[1:], "o:p:hd:r:", ["--outputdirectory=","plot=","help", "device=", "rate="])
+	except getopt.GetoptError as err:
+		print(err)
+		usage()
+		sys.exit(2)
+	
+	# if not args:
+		# usage()
+	
+	for o, a in opts:
+		if o in ("-h", "--help"):
+			usage()
+			sys.exit()
+		elif o in ("-p", "--plot"):
+			plot = a
+		elif o in ("-d", "--device"):
+			device = a
+		elif o in ("-o", "--outputdirectory"):
+			outputdirectory = a
+		elif o in ("-r", "--rate"):
+			rate = int(a)
+		else:
+			assert False, "unhandled option"
+			
+	chunksize = int(rate * 2048 / 48000) #to get all time 23hz bandwith by pixel
+	# globalfftdatas=[[0]*chunksize]*1000
+	globalpeaks=[0]*chunksize
+	
+	print("device:" + device + "\nrate:" + str(rate) + "sample/s\npixel bandwith:"+"{:.1f}".format(rate/chunksize)+"hz/pix\ntime line resolution:"+str((chunksize/rate)*1000)+"ms")
+	
+	threadAudio = ThGetAudio(device,rate,chunksize)
+	threadAudio.start()
+	
+	threadFFT = ThSpectrumAnalyzer()
+	threadFFT.start()
+	
+	if plot:
+		if outputdirectory[len(outputdirectory)-1] != "/":
+			outputdirectory = outputdirectory + "/"
+		threadPlot = Thplot(plot,outputdirectory)
+		threadPlot.start()
+
+	  	
+
