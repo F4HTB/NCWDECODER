@@ -8,3 +8,9 @@ Output analysing image example:
 zoom on a cw qso:
 
 ![alt text](https://github.com/F4HTB/NCWDECODER/blob/master/zoom_to_1599422024.39825_out.png?raw=true)
+
+You can find samples of peaks detection images in peakoutput:
+
+![alt text](https://github.com/F4HTB/NCWDECODER/blob/master/peaksoutput/examplespeaks.png?raw=true)
+
+
