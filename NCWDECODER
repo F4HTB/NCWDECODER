@@ -12,6 +12,7 @@ import scipy.signal
 from threading import Thread
 from PIL import Image
 import time
+import peakutils
 
 numpy.seterr(divide='ignore')
 
@@ -57,7 +58,6 @@ class ThSpectrumAnalyzer(Thread):
 			print("wait for audio chunk for start")
 			time.sleep(0.1)
 		print("audio data ready!")
-		
 		self.chunksize = len(audiodatas[0])
 		self.window=[]
 		for a in numpy.hanning(chunksize): #calculation of the hanning window and stored in a double array to facilitate multiplication
@@ -67,7 +67,7 @@ class ThSpectrumAnalyzer(Thread):
 		
 		self.windowbordermin=int(self.chunksize*20/100) #calculation of the fft min index data to be taken into account for the average speed during peak detection. For not to take into account the edges of the fft
 		self.windowbordermax=int(self.chunksize-self.windowbordermin) #calculation of the fft max index data to be taken into account for the average speed during peak detection
-		self.peakscore=[0]*self.chunksize
+		self.peakscore=[0]*int(self.chunksize/2)
 
 	def fft(self, data1,data2,number=2):
 		lendata=int(len(data1)/number)
@@ -81,13 +81,16 @@ class ThSpectrumAnalyzer(Thread):
 			fd_spectrum_rot = numpy.fft.fftshift(numpy.fft.fft(datasend,norm="ortho"))
 			arrayoffft.append(20.*numpy.log10(numpy.real(fd_spectrum_rot * fd_spectrum_rot.conj())))
 		return arrayoffft
-	
+
 	def findpeakinfft(self, datas, thresoldv=1, min_distance=1): #
-		minvalue = numpy.average(datas[self.windowbordermin:self.windowbordermax])+10 #calcul of the noise floor withut the borders and add 3db
-		peaks, _ = scipy.signal.find_peaks(datas, height=minvalue,distance=min_distance,threshold=thresoldv,prominence=1,width=5)#compute peak searching with datas, height to the minimum value, distance minimal beetween two peaks, use threshold for not detect the same peak nearby
+		noisefloor = numpy.median(datas[self.windowbordermin:self.windowbordermax])+3 #calcul of the noise floor withut the borders and add 3db
+		#print(minvalue)
+		# peaks, _ = scipy.signal.find_peaks(datas, height=noisefloor,distance=min_distance,threshold=thresoldv,prominence=1,width=5)#compute peak searching with datas, height to the minimum value, distance minimal beetween two peaks, use threshold for not detect the same peak nearby
+		peaks = peakutils.indexes(datas, thres=0.5, min_dist=10)
 		return peaks
 		
 	def CWdetect(self, newpeaks):
+		global globalpeaks
 		for a in newpeaks:
 			self.peakscore[a] = self.peakscore[a] + 5
 		for i, val in enumerate(self.peakscore):
@@ -96,7 +99,7 @@ class ThSpectrumAnalyzer(Thread):
 				self.peakscore[i]=0
 				globalpeaks[i]=0
 			elif (val > 50):
-				globalpeaks[i]=100
+				globalpeaks[i]=1
 			elif (val < 10):
 				globalpeaks[i]=0
 				
@@ -105,16 +108,16 @@ class ThSpectrumAnalyzer(Thread):
 		while True :
 			# try:
 			if len(audiodatas)>4:
-				if len(audiodatas[0])>0:
+				if len(audiodatas[0])>0 and len(audiodatas[1])>0:
 					fftdatas = self.fft(audiodatas[0],audiodatas[1])
 					for row in fftdatas:
 						globalfftdatas.append(row)
 						counterbuffer += 1
 					while len(globalfftdatas) > 1000:
 						globalfftdatas.pop(0)
-				# if fftdatas.any():
-					# peaksindex = self.findpeakinfft(fftdatas)
-					# self.CWdetect(peaksindex)
+					if fftdatas:
+						peaksindex = self.findpeakinfft(fftdatas[0])
+						self.CWdetect(peaksindex)
 					audiodatas.pop(0)
 			else:
 				time.sleep(0.1)
@@ -126,21 +129,32 @@ class Thplot(Thread):
 
 	def __init__(self, plot,outputdirectory):
 		Thread.__init__(self)
-		while(len(globalfftdatas)<1000):
-			print("bufferisation:"+str(int(len(globalfftdatas)*100/1000))+"%")
+		
+		while(len(globalfftdatas)<10):
 			time.sleep(0.2)
 			
 		if plot == "tobmp":
 			self.arrimg=numpy.zeros((1000,len(globalfftdatas[0])), dtype=float)
 		
+		if plot == "tobmp" or plot == "watterfall":
+			while(len(globalfftdatas)<500):
+				print("bufferisation:"+str(int(len(globalfftdatas)*100/1000))+"%")
+				time.sleep(0.2)
+				
+		if plot == "fftonly":
+			self.ylimax = numpy.amax(globalfftdatas[len(globalfftdatas)-1])
+		
 		self.outputdirectory = outputdirectory
 		print("ready to plot:" + str(plot))
+
+	def column(self,matrix, i):
+		return [row[i-4:i+4] for row in matrix]
 
 	def run(self):
 		global globalpeaks, globalfftdatas, counterbuffer
 		while True:
-			if plot == "fftonly":
-				plt.ylim(0, 500)
+			if plot == "fftonly" and len(globalfftdatas):
+				plt.ylim(0, self.ylimax)
 				plt.plot(globalfftdatas[len(globalfftdatas)-1])
 				plt.plot(globalpeaks)
 				plt.draw()
@@ -163,6 +177,18 @@ class Thplot(Thread):
 				print("print image")
 				numpy.copyto(self.arrimg, globalfftdatas)
 				scipy.misc.toimage(self.arrimg, high=255, low=0, cmin=0, cmax=255).save(str(self.outputdirectory)+str(time.time())+'_out.png')
+				counterbuffer=0
+				time.sleep(1)
+			elif plot == "tobmppeak":
+				while counterbuffer < 500:
+						print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+						time.sleep(0.2)
+				print(globalpeaks)
+				for i, val in enumerate(globalpeaks):
+					if(val==1):
+						print("print image")
+						self.arrimg = self.column(globalfftdatas,i)
+						scipy.misc.toimage(self.arrimg, high=255, low=0, cmin=0, cmax=255).save(str(self.outputdirectory)+str(time.time())+str(i)+'_out.png')
 				counterbuffer=0
 				time.sleep(1)
 				
