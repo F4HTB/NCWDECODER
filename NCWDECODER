@@ -22,10 +22,11 @@ audiodatas = []
 counterbuffer=0
 
 def usage():
-	print('usage: recordtest.py [-d <device>] [-p <plot mode>] [-r <rate>] [-o <output path for image plot>]', file=sys.stderr)
+	print('usage: recordtest.py [-i <lenght of data array to analyse> ] [-d <device>] [-p <plot mode>] [-r <rate>] [-o <output path for image plot>]', file=sys.stderr)
 	print("example: ./NCWDECODER -d plughw:lp20,1  -r 384000 -p fftonly")
 	print("example: ./NCWDECODER -d plughw:lp20,1-r 384000 -i 1000 -p tobmppeak -o ./playbook0/")
 	print("plot can be 'fftonly' to see fft, 'watterfall' to see watterfall, 'tobmp' to registrer watterfall in hight resolution png")
+	print("peak_threshold in %, peak_min_dist in hz")
 	sys.exit(2)
 
 class ThGetAudio(Thread):
@@ -202,9 +203,11 @@ if __name__ == "__main__":
 	rate = 48000
 	plot = False
 	datalenght=1000
+	peak_threshold=0.5
+	peak_min_dist=5
 	
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "i:o:p:hd:r:", ["--inputdatalenght=","--outputdirectory=","plot=","help", "device=", "rate="])
+		opts, args = getopt.getopt(sys.argv[1:], "i:o:p:hd:r:", ["--inputdatalenght=","--outputdirectory=","plot=","help", "device=", "rate=", "peak_threshold=", "peak_min_dist="])
 	except getopt.GetoptError as err:
 		print(err)
 		usage()
@@ -227,11 +230,14 @@ if __name__ == "__main__":
 			rate = int(a)
 		elif o in ("-i", "--datalenght"):
 			datalenght = int(a)
+		elif o in ("--peak_threshold"):
+			peak_threshold = int(a/100)
+		elif o in ("--peak_min_dist"):
+			peak_min_dist = int(a/23) # fixed in the code 23hz bandwith
 		else:
 			assert False, "unhandled option"
 			
 	chunksize = int(rate * 2048 / 48000) #to get all time 23hz bandwith by pixel
-	# globalfftdatas=[[0]*chunksize]*1000
 	globalpeaks=[0]*chunksize
 	
 	print("device:" + device + "\nrate:" + str(rate) + "sample/s\npixel bandwith:"+"{:.1f}".format(rate/chunksize)+"hz/pix\ntime line resolution:"+str((chunksize/rate)*1000)+"ms")
