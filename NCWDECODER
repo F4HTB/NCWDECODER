@@ -8,7 +8,7 @@ import time
 import matplotlib.pyplot as plt
 import struct
 import numpy
-import scipy.signal
+#import scipy.signal
 from threading import Thread
 from PIL import Image
 import time
@@ -24,6 +24,7 @@ counterbuffer=0
 def usage():
 	print('usage: recordtest.py [-d <device>] [-p <plot mode>] [-r <rate>] [-o <output path for image plot>]', file=sys.stderr)
 	print("example: ./NCWDECODER -d plughw:lp20,1  -r 384000 -p fftonly")
+	print("example: ./NCWDECODER -d plughw:lp20,1-r 384000 -i 1000 -p tobmppeak -o ./playbook0/")
 	print("plot can be 'fftonly' to see fft, 'watterfall' to see watterfall, 'tobmp' to registrer watterfall in hight resolution png")
 	sys.exit(2)
 
@@ -51,9 +52,10 @@ class ThGetAudio(Thread):
 
 class ThSpectrumAnalyzer(Thread):
 	
-	def __init__(self):
+	def __init__(self,datalenght):
 		Thread.__init__(self)
 		global globalpeaks, globalfftdatas, audiodatas
+		self.datalenght=datalenght
 		while not len(audiodatas):
 			print("wait for audio chunk for start")
 			time.sleep(0.1)
@@ -83,10 +85,10 @@ class ThSpectrumAnalyzer(Thread):
 		return arrayoffft
 
 	def findpeakinfft(self, datas, thresoldv=1, min_distance=1): #
-		noisefloor = numpy.median(datas[self.windowbordermin:self.windowbordermax])+3 #calcul of the noise floor withut the borders and add 3db
+		#noisefloor = numpy.median(datas[self.windowbordermin:self.windowbordermax])+3 #calcul of the noise floor withut the borders and add 3db
 		#print(minvalue)
 		# peaks, _ = scipy.signal.find_peaks(datas, height=noisefloor,distance=min_distance,threshold=thresoldv,prominence=1,width=5)#compute peak searching with datas, height to the minimum value, distance minimal beetween two peaks, use threshold for not detect the same peak nearby
-		peaks = peakutils.indexes(datas, thres=0.5, min_dist=10)
+		peaks = peakutils.indexes(datas, thres=0.3, min_dist=5)
 		return peaks
 		
 	def CWdetect(self, newpeaks):
@@ -113,7 +115,7 @@ class ThSpectrumAnalyzer(Thread):
 					for row in fftdatas:
 						globalfftdatas.append(row)
 						counterbuffer += 1
-					while len(globalfftdatas) > 1000:
+					while len(globalfftdatas) > self.datalenght:
 						globalfftdatas.pop(0)
 					if fftdatas:
 						peaksindex = self.findpeakinfft(fftdatas[0])
@@ -127,22 +129,23 @@ class ThSpectrumAnalyzer(Thread):
 				
 class Thplot(Thread):
 
-	def __init__(self, plot,outputdirectory):
+	def __init__(self, plot,outputdirectory,datalenght):
 		Thread.__init__(self)
-		
+		self.datalenght = datalenght
 		while(len(globalfftdatas)<10):
 			time.sleep(0.2)
 			
 		if plot == "tobmp":
-			self.arrimg=numpy.zeros((1000,len(globalfftdatas[0])), dtype=float)
+			self.arrimg=numpy.zeros((self.datalenght,len(globalfftdatas[0])), dtype=float)
 		
 		if plot == "tobmp" or plot == "watterfall":
-			while(len(globalfftdatas)<500):
-				print("bufferisation:"+str(int(len(globalfftdatas)*100/1000))+"%")
+			while(len(globalfftdatas)<self.datalenght):
+				print("bufferisation:"+str(int(len(globalfftdatas)*100/self.datalenght))+"%")
 				time.sleep(0.2)
 				
 		if plot == "fftonly":
 			self.ylimax = numpy.amax(globalfftdatas[len(globalfftdatas)-1])
+		
 		
 		self.outputdirectory = outputdirectory
 		print("ready to plot:" + str(plot))
@@ -161,70 +164,54 @@ class Thplot(Thread):
 				plt.pause(0.5)
 				plt.clf()
 			elif plot == "watterfall":
-				while counterbuffer < 500:
-					print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+				while counterbuffer < self.datalenght:
+					print("bufferisation:"+str(int(counterbuffer*100/self.datalenght))+"%")
 					time.sleep(0.2)
 				plt.ylim(0, len(globalfftdatas))
-				plt.imshow(globalfftdatas) 
+				plt.imshow(globalfftdatas[:self.datalenght]) 
 				plt.draw()
 				plt.pause(1)
 				plt.clf()
 				counterbuffer=0
 			elif plot == "tobmp":
-				while counterbuffer < 500:
-						print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+				while counterbuffer < self.datalenght:
+						print("bufferisation:"+str(int(counterbuffer*100/self.datalenght))+"%")
 						time.sleep(0.2)
 				print("print image")
-				numpy.copyto(self.arrimg, globalfftdatas)
-				scipy.misc.toimage(self.arrimg, high=255, low=0, cmin=0, cmax=255).save(str(self.outputdirectory)+str(time.time())+'_out.png')
+				numpy.copyto(self.arrimg, globalfftdatas[:self.datalenght])
+				Image.fromarray(self.arrimg).convert("RGB").save(str(self.outputdirectory)+str(time.time())+'_out.png',optimize=False,quality=100)
 				counterbuffer=0
 				time.sleep(1)
 			elif plot == "tobmppeak":
-				while counterbuffer < 500:
-						print("bufferisation:"+str(int(counterbuffer*100/1000))+"%")
+				imagecounter = 0
+				while counterbuffer < self.datalenght:
+						print("bufferisation:"+str(int(counterbuffer*100/self.datalenght))+"%")
 						time.sleep(0.2)
-				print(globalpeaks)
 				for i, val in enumerate(globalpeaks):
 					if(val==1):
-						print("print image")
-						self.arrimg = self.column(globalfftdatas,i)
-						scipy.misc.toimage(self.arrimg, high=255, low=0, cmin=0, cmax=255).save(str(self.outputdirectory)+str(time.time())+str(i)+'_out.png')
+						imagecounter = imagecounter + 1
+						self.arrimg = numpy.asarray(self.column(globalfftdatas[:self.datalenght],i))
+						Image.fromarray(self.arrimg).convert("RGB").save(str(self.outputdirectory)+str(time.time())+str(i)+'_out.png',optimize=False,quality=100)
 				counterbuffer=0
+				print("find "+str(imagecounter)+" images")
 				time.sleep(1)
-				
-				# arr = numpy.array(globalfftdatas) 
-				# arr.reshape(-1, 3)
-				# Image.fromarray(globalfftdatas).save("./mesh_trans",".bmp")
-				
-				# paletteR, paletteG, paletteB = 4, 1, 4
-				# k = 4*256
-				
-				# def convert(val):
-					# v = val if val < 255 else 255
-					# return [v/paletteR, v/paletteG, v/paletteB]
-				
-				# for i in globalfftdatas:
-					# arrpng = [convert(pt) for pt in i]
-					# arrpng = numpy.array(arrpng)
-				
-				# imgOut = Image.fromarray(np.uint8(arrpng), 'RGB')
-				# imgOut.save('./'+str(time.time())+'_out.png')
 	
 if __name__ == "__main__":
 	outputdirectory = "./"
 	device = 'default'
 	rate = 48000
 	plot = False
+	datalenght=1000
 	
 	try:
-		opts, args = getopt.getopt(sys.argv[1:], "o:p:hd:r:", ["--outputdirectory=","plot=","help", "device=", "rate="])
+		opts, args = getopt.getopt(sys.argv[1:], "i:o:p:hd:r:", ["--inputdatalenght=","--outputdirectory=","plot=","help", "device=", "rate="])
 	except getopt.GetoptError as err:
 		print(err)
 		usage()
 		sys.exit(2)
 	
-	# if not args:
-		# usage()
+	if len(opts)==0 :
+		usage()
 	
 	for o, a in opts:
 		if o in ("-h", "--help"):
@@ -238,6 +225,8 @@ if __name__ == "__main__":
 			outputdirectory = a
 		elif o in ("-r", "--rate"):
 			rate = int(a)
+		elif o in ("-i", "--datalenght"):
+			datalenght = int(a)
 		else:
 			assert False, "unhandled option"
 			
@@ -250,13 +239,13 @@ if __name__ == "__main__":
 	threadAudio = ThGetAudio(device,rate,chunksize)
 	threadAudio.start()
 	
-	threadFFT = ThSpectrumAnalyzer()
+	threadFFT = ThSpectrumAnalyzer(datalenght)
 	threadFFT.start()
 	
 	if plot:
 		if outputdirectory[len(outputdirectory)-1] != "/":
 			outputdirectory = outputdirectory + "/"
-		threadPlot = Thplot(plot,outputdirectory)
+		threadPlot = Thplot(plot,outputdirectory,datalenght)
 		threadPlot.start()
 
 	  	
